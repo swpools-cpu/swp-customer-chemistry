@@ -247,6 +247,15 @@ function SWPCustomerChemistryApp() {
         if (poolJob.poolGallons > 0) setVolume(poolJob.poolGallons);
         if (poolJob.sanitizerType) setSanitizerType(poolJob.sanitizerType);
         if (poolJob.filterType) setFilterType(poolJob.filterType);
+        // Load saved readings from localStorage
+        try {
+          var saved = localStorage.getItem('swp_cust_readings_' + poolJob.number);
+          if (saved) {
+            var parsed = JSON.parse(saved);
+            if (parsed.current) setCurrent(parsed.current);
+            if (parsed.chemsAdded) setChemsAdded(parsed.chemsAdded);
+          }
+        } catch(e) {}
         setAuthed(true);
       } else { setAuthErr('Job not found. Please check your job number and try again.'); }
       setLoading(false);
@@ -296,7 +305,7 @@ function SWPCustomerChemistryApp() {
       filterCleanDone: 'no', filterBackwash: 'no', deAmount: '', filterNoteBody: '', filterCleanEpoch: ''
     };
     fetch(WEBHOOK_SAVE, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
-    .then(function(r){ if(r.ok){setSaveResult('success');}else{setSaveResult('error');} setSaving(false); })
+    .then(function(r){ if(r.ok){ setSaveResult('success'); try { localStorage.setItem('swp_cust_readings_' + job.number, JSON.stringify({current:current, chemsAdded:chemsAdded})); } catch(e) {} }else{setSaveResult('error');} setSaving(false); })
     .catch(function(){ setSaveResult('error'); setSaving(false); });
   }
   // ========== RENDER ==========
