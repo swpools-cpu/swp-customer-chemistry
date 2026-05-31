@@ -291,6 +291,7 @@ function SWPCustomerChemistryApp() {
       readingTimestamp: new Date().toISOString(),
       allReadings: { temp:current.temp, pH:current.pH, ta:current.ta, ch:current.ch, cya:current.cya, tds:current.tds, fc:current.fc, phos:current.phos, carbAlk:currentLSI.carbAlk },
       reportPdf: '', reportFilename: '', companyCamProjectId: '',
+      isCustomerSubmission: 'yes',
       filterType: filterType, updateFilterType: 'no',
       filterCleanDone: 'no', filterBackwash: 'no', deAmount: '', filterNoteBody: '', filterCleanEpoch: ''
     };
