@@ -368,13 +368,14 @@ function SWPCustomerChemistryApp() {
       if(r.ok){
         setSaveResult('success');
         try { localStorage.setItem('swp_cust_readings_' + job.number, JSON.stringify({current:current, chemsAdded:chemsAdded})); } catch(e) {}
-        // Upload photos to CompanyCam via separate webhook
-        if (hasPhotos && ccLinked) {
+        // Upload photos via separate webhook
+        if (hasPhotos) {
           photos.forEach(function(p) {
             fetch(WEBHOOK_PHOTO, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
+                jnid: job.jnid,
                 companyCamProjectId: payload.companyCamProjectId,
                 photoDataUri: p.dataUri,
                 jobName: job.name
