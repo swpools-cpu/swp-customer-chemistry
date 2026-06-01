@@ -362,13 +362,12 @@ function SWPCustomerChemistryApp() {
       photoCount: photos.length
     };
     var hasPhotos = photos.length > 0;
-    var ccLinked = !!payload.companyCamProjectId;
     fetch(WEBHOOK_SAVE, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) })
     .then(function(r){
       if(r.ok){
         setSaveResult('success');
         try { localStorage.setItem('swp_cust_readings_' + job.number, JSON.stringify({current:current, chemsAdded:chemsAdded})); } catch(e) {}
-        // Upload photos via separate webhook
+        // Upload photos directly to JobNimbus via webhook
         if (hasPhotos) {
           photos.forEach(function(p) {
             fetch(WEBHOOK_PHOTO, {
@@ -376,8 +375,7 @@ function SWPCustomerChemistryApp() {
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({
                 jnid: job.jnid,
-                companyCamProjectId: payload.companyCamProjectId,
-                photoDataUri: p.dataUri,
+                photoBase64: p.dataUri.split(',')[1],
                 jobName: job.name
               })
             }).catch(function(err) { console.warn('Photo upload failed:', err); });
@@ -576,17 +574,15 @@ function SWPCustomerChemistryApp() {
             {photoProcessing ? 'Processing...' : photos.length === 0 ? 'Take / Add Photos' : 'Add More Photos'}
           </button>
         )}
-        <div style={{fontSize:10,color:B.grayDim,marginTop:6,textAlign:'center'}}>{photos.length}/{MAX_PHOTOS} photos {job.companyCamProjectId ? '' : '(no CompanyCam project linked)'}</div>
+        <div style={{fontSize:10,color:B.grayDim,marginTop:6,textAlign:'center'}}>{photos.length}/{MAX_PHOTOS} photos</div>
       </div>
       {/* SAVE */}
       {saveResult === 'success' && (
         <div style={{textAlign:'center',margin:'12px auto 8px'}}>
           <div style={{color:B.flagGreen,fontSize:18,fontWeight:700}}>Readings Saved!</div>
           <div style={{fontSize:12,color:B.grayMid,marginTop:4}}>Your readings have been recorded for {job.name}</div>
-          {photos.length > 0 && job.companyCamProjectId
+          {photos.length > 0
             ? <div style={{fontSize:11,color:B.flagGreen,marginTop:3}}>{photos.length} photo{photos.length>1?'s':''} submitted</div>
-            : photos.length > 0
-            ? <div style={{fontSize:11,color:B.flagYellow,marginTop:3}}>{photos.length} photo{photos.length>1?'s':''} attached — no CompanyCam project linked</div>
             : null
           }
           <button style={{marginTop:10,background:'transparent',border:'1px solid '+B.teal,borderRadius:20,padding:'8px 20px',color:B.teal,fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:"'Jost',sans-serif"}} onClick={function(){setSaveResult(null);setPhotos([]);}}>Record New Reading</button>
@@ -598,7 +594,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.1.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
