@@ -95,21 +95,6 @@ var EXTRA_PARAMS = [
   { key:'phos', label:'Phosphate', min:0, max:5000, step:100, dflt:0 },
 ];
 function calcLSI(vals) { var carbAlk = Math.max(vals.ta - Math.round(vals.cya / 3), 5); var TF = interp(TEMP_TABLE, vals.temp); var CF = interp(CH_TABLE, Math.max(vals.ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5)); var lsi = +(vals.pH + TF + CF + AF - 12.1).toFixed(2); return { lsi:lsi, TF:TF, CF:CF, AF:AF, carbAlk:carbAlk }; }
-function calcAutoDesired(current, sanitizerType) {
-  var isSalt = sanitizerType === 'Salt';
-  var temp = current.temp;
-  var cyaMin = isSalt ? 60 : 30; var cyaMax = isSalt ? 80 : 50; var cyaIdeal = isSalt ? 70 : 40;
-  var cya; if (current.cya >= cyaMin && current.cya <= cyaMax) { cya = current.cya; } else if (current.cya < cyaMin) { cya = cyaIdeal; } else { cya = current.cya; }
-  var ch; if (current.ch >= 200 && current.ch <= 400) { ch = current.ch; } else if (current.ch < 200) { ch = 275; } else { ch = current.ch; }
-  var targetCarbAlk = 80; var ta = targetCarbAlk + Math.round(cya / 3) + 5; ta = Math.max(60, Math.min(120, ta));
-  var tds = isSalt ? 3200 : current.tds;
-  var TF = interp(TEMP_TABLE, temp); var carbAlk = Math.max(ta - Math.round(cya / 3), 5);
-  var CF = interp(CH_TABLE, Math.max(ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5));
-  var idealPH = +(12.1 - TF - CF - AF).toFixed(2); var pH = +(idealPH - 0.1).toFixed(1); pH = Math.max(7.2, Math.min(7.8, pH));
-  var minFC = Math.max(2.0, +(cya * 0.075).toFixed(1)); var fc = +(minFC + 2.0).toFixed(1); fc = Math.min(fc, 10.0);
-  var phos = Math.min(current.phos, 200);
-  return { temp:temp, pH:pH, ta:ta, ch:ch, cya:cya, tds:tds, fc:fc, phos:phos };
-}
 function calcDosing(current, desired, volume, sanitizerType) {
   var vf = volume / 10000; var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5); var recs = [];
   if (current.pH > desired.pH + 0.05) { var pHDrop = current.pH - desired.pH; var acidDose = +(pHDrop * (5.317 + 0.2495 * carbAlk) * vf).toFixed(2); recs.push({ chem:'Muriatic Acid (31.45%)', amount:acidDose, unit:'fl oz', reason:'Lower pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) }); }
@@ -196,7 +181,6 @@ function SWPCustomerChemistryApp() {
   var _sv = useState(false), saving = _sv[0], setSaving = _sv[1];
   var _sr = useState(null), saveResult = _sr[0], setSaveResult = _sr[1];
   var _ca = useState(''), chemsAdded = _ca[0], setChemsAdded = _ca[1];
-  var _dm = useState('auto'), desiredMode = _dm[0], setDesiredMode = _dm[1];
   // Photo state
   var _photos = useState([]), photos = _photos[0], setPhotos = _photos[1];
   var _photoProcessing = useState(false), photoProcessing = _photoProcessing[0], setPhotoProcessing = _photoProcessing[1];
@@ -216,10 +200,6 @@ function SWPCustomerChemistryApp() {
     var avgD2=(v.deepDepth+v.shallowDepth)/2;
     return +(v.length*v.width*avgD2*GAL).toFixed(0);
   }, [volShape, volInputs]);
-  // Auto-LSI with weekly buffer always on for customer app
-  useEffect(function(){
-    if (desiredMode === 'auto') { setDesired(calcAutoDesired(current, sanitizerType)); }
-  }, [desiredMode, current, sanitizerType]);
   useEffect(function(){
     if (sanitizerType === 'Salt' && desired.tds === 0) { updateDesired('tds', 3200); }
   }, [sanitizerType]);
@@ -446,22 +426,15 @@ function SWPCustomerChemistryApp() {
           <div style={{flex:'1 1 0'}} />
           <div style={{flex:'1 1 0',textAlign:'center'}}>
             <div style={S.colHeader}>Target</div>
-            <div style={{display:'flex',justifyContent:'center',marginTop:2}}>
-              <div style={Object.assign({},S.toggleGroup,{transform:'scale(0.85)'})}>
-                <button style={toggleBtnStyle(desiredMode==='auto')} onClick={function(){setDesiredMode('auto');}}>Auto</button>
-                <button style={toggleBtnStyle(desiredMode==='manual')} onClick={function(){setDesiredMode('manual');}}>Manual</button>
-              </div>
-            </div>
           </div>
         </div>
-        {desiredMode==='auto' && <div style={{textAlign:'center',fontSize:10,color:B.teal,marginBottom:6,fontStyle:'italic'}}>LSI-Balanced + Weekly Buffer</div>}
         {PARAMS.map(function(p){
           var flag = getFlag(p.key, current[p.key], ranges); var label = getParamLabel(p); var dd = p.decimals||0;
-          var desVal = desired[p.key]; var desDisplay = dd > 0 ? desVal.toFixed(dd) : String(desVal);
+          var desVal = desired[p.key];
           return (<div key={p.key} style={S.paramRow}>
             <ParamInput mode={mode} value={current[p.key]} step={p.step} min={p.min} max={p.max} onChange={function(v){updateCurrent(p.key,v);}} decimals={dd} />
             <div style={S.paramLabel}>{label}<FlagIndicator flag={flag} />{p.showCeiling && <div style={S.subLabel}>pH Ceiling<br/>{currentCeiling}</div>}{p.showCarbAlk && <div style={S.subLabel}>{p.subLabel}<br/>{currentLSI.carbAlk}</div>}</div>
-            {desiredMode==='auto' ? <div style={{flex:'1 1 0',textAlign:'center',fontSize:16,fontWeight:800,color:B.lsiGreen}}>{desDisplay}</div> : <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />}
+            <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />
           </div>);
         })}
         <div style={S.lsiRow}>
@@ -472,11 +445,11 @@ function SWPCustomerChemistryApp() {
         <div style={S.separator} />
         {EXTRA_PARAMS.map(function(p){
           var flag = getFlag(p.key, current[p.key], ranges); var dd = p.decimals||0;
-          var desVal = desired[p.key]; var desDisplay = dd > 0 ? desVal.toFixed(dd) : String(desVal);
+          var desVal = desired[p.key];
           return (<div key={p.key} style={S.paramRow}>
             <ParamInput mode={mode} value={current[p.key]} step={p.step} min={p.min} max={p.max} onChange={function(v){updateCurrent(p.key,v);}} decimals={dd} />
             <div style={S.paramLabel}>{p.label}<FlagIndicator flag={flag} /></div>
-            {desiredMode==='auto' ? <div style={{flex:'1 1 0',textAlign:'center',fontSize:16,fontWeight:800,color:B.lsiGreen}}>{desDisplay}</div> : <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />}
+            <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />
           </div>);
         })}
       </div>
@@ -489,10 +462,6 @@ function SWPCustomerChemistryApp() {
       </div>
       <div style={S.tabContent}>
         {tab==='dosing' && <div>
-          {desiredMode==='auto' && <div style={{background:B.teal+'20',border:'1px solid '+B.teal,borderRadius:8,padding:'10px 12px',marginBottom:10}}>
-            <div style={{fontSize:12,fontWeight:700,color:B.teal,marginBottom:4}}>Weekly Service Targets</div>
-            <div style={{fontSize:11,color:B.gray,lineHeight:1.4}}>Targets are LSI-balanced with a weekly buffer so your pool stays balanced between service visits. pH is set slightly below ideal (it rises naturally). Chlorine includes extra buffer for 7-day drift.</div>
-          </div>}
           {dosing.length===0 && <div style={Object.assign({},S.doseItem,{textAlign:'center'})}><div style={Object.assign({},S.doseChem,{color:'#5cb85c'})}>Your water is balanced!</div></div>}
           {dosing.map(function(d,i){return <div key={i} style={S.doseItem}><div style={S.doseChem}>{d.chem}</div>{d.amount!=null && <div style={S.doseAmt}>{d.amount} {d.unit}</div>}<div style={S.doseReason}>{d.reason}</div></div>;})}
         </div>}
@@ -594,7 +563,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.1 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
