@@ -203,6 +203,10 @@ function SWPCustomerChemistryApp() {
   useEffect(function(){
     if (sanitizerType === 'Salt' && desired.tds === 0) { updateDesired('tds', 3200); }
   }, [sanitizerType]);
+  // Water temp can't be dosed — desired temp mirrors current temp
+  useEffect(function(){
+    setDesired(function(prev){ if (prev.temp === current.temp) return prev; var n = Object.assign({}, prev); n.temp = current.temp; return n; });
+  }, [current.temp]);
   var currentLSI = useMemo(function(){return calcLSI(current);}, [current]);
   var desiredLSI = useMemo(function(){return calcLSI(desired);}, [desired]);
   var currentMeta = lsiMeta(currentLSI.lsi);
@@ -434,7 +438,9 @@ function SWPCustomerChemistryApp() {
           return (<div key={p.key} style={S.paramRow}>
             <ParamInput mode={mode} value={current[p.key]} step={p.step} min={p.min} max={p.max} onChange={function(v){updateCurrent(p.key,v);}} decimals={dd} />
             <div style={S.paramLabel}>{label}<FlagIndicator flag={flag} />{p.showCeiling && <div style={S.subLabel}>pH Ceiling<br/>{currentCeiling}</div>}{p.showCarbAlk && <div style={S.subLabel}>{p.subLabel}<br/>{currentLSI.carbAlk}</div>}</div>
-            <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />
+            {p.key==='temp'
+              ? <div style={{flex:'1 1 0',textAlign:'center',fontSize:16,fontWeight:800,color:B.grayMid}}>{desVal}</div>
+              : <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />}
           </div>);
         })}
         <div style={S.lsiRow}>
@@ -563,7 +569,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.1 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.2 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
