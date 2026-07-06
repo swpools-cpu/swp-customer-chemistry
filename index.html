@@ -243,7 +243,6 @@ function SWPCustomerChemistryApp() {
           if (saved) {
             var parsed = JSON.parse(saved);
             if (parsed.current) setCurrent(parsed.current);
-            if (parsed.chemsAdded) setChemsAdded(parsed.chemsAdded);
           }
         } catch(e) {}
         setAuthed(true);
@@ -350,7 +349,8 @@ function SWPCustomerChemistryApp() {
     .then(function(r){
       if(r.ok){
         setSaveResult('success');
-        try { localStorage.setItem('swp_cust_readings_' + job.number, JSON.stringify({current:current, chemsAdded:chemsAdded})); } catch(e) {}
+        try { localStorage.setItem('swp_cust_readings_' + job.number, JSON.stringify({current:current})); } catch(e) {}
+        setChemsAdded('');
         // Upload photos directly to JobNimbus via webhook
         if (hasPhotos) {
           photos.forEach(function(p) {
@@ -569,7 +569,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.2 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.3 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
