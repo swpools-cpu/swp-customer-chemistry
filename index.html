@@ -97,10 +97,25 @@ var EXTRA_PARAMS = [
 function calcLSI(vals) { var carbAlk = Math.max(vals.ta - Math.round(vals.cya / 3), 5); var TF = interp(TEMP_TABLE, vals.temp); var CF = interp(CH_TABLE, Math.max(vals.ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5)); var lsi = +(vals.pH + TF + CF + AF - 12.1).toFixed(2); return { lsi:lsi, TF:TF, CF:CF, AF:AF, carbAlk:carbAlk }; }
 function calcDosing(current, desired, volume, sanitizerType) {
   var vf = volume / 10000; var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5); var recs = [];
-  if (current.pH > desired.pH + 0.05) { var pHDrop = current.pH - desired.pH; var acidDose = +(pHDrop * (5.317 + 0.2495 * carbAlk) * vf).toFixed(2); recs.push({ chem:'Muriatic Acid (31.45%)', amount:acidDose, unit:'fl oz', reason:'Lower pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) }); }
-  if (current.pH < desired.pH - 0.05) { recs.push({ chem:'Soda Ash (Na₂CO₃)', amount:+(((desired.pH - current.pH)/0.1)*0.502*vf).toFixed(2), unit:'lbs', reason:'Raise pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) }); }
+  var loweringTA = current.ta > desired.ta + 10;
+  // Lowering TA is dosed FIRST — the acid dosed for TA also lowers pH (Orenda method),
+  // so no separate pH-lowering dose is given when a TA reduction is being dosed.
+  if (loweringTA) {
+    var taAcid = +(((current.ta - desired.ta) / 10) * 26 * vf).toFixed(1);
+    recs.push({ chem:'Muriatic Acid (31.45%) + Aerate', amount:taAcid, unit:'fl oz', reason:'Lower TA ' + current.ta + ' → ' + desired.ta + ' ppm — add this FIRST, with the pump running. Split into 2–3 smaller doses a few hours apart (never all at once), pouring slowly around the deep end. Aerate after (run water features/jets) to bring pH back up, then retest before adding anything else' });
+    if (current.pH > desired.pH + 0.05) {
+      recs.push({ chem:'pH — no separate acid needed', amount:null, unit:'', reason:'The TA dose above will also lower your pH. Retest pH after the pool has circulated and aerated — only treat pH if it is still above ' + desired.pH.toFixed(1) });
+    }
+  }
+  if (!loweringTA && current.pH > desired.pH + 0.05) { var pHDrop = current.pH - desired.pH; var acidDose = +(pHDrop * (5.317 + 0.2495 * carbAlk) * vf).toFixed(2); recs.push({ chem:'Muriatic Acid (31.45%)', amount:acidDose, unit:'fl oz', reason:'Lower pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) + ' — add with the pump running, pouring slowly around the deep end' }); }
+  if (current.pH < desired.pH - 0.05) {
+    if (loweringTA) {
+      recs.push({ chem:'Borax — raise pH (after TA dose)', amount:null, unit:'', reason:'pH is below target while lowering TA — if pH still needs a boost afterward, use borax, NOT soda ash (soda ash pushes TA right back up). Retest after the TA dose & aeration before adding anything' });
+    } else {
+      recs.push({ chem:'Soda Ash (Na₂CO₃)', amount:+(((desired.pH - current.pH)/0.1)*0.502*vf).toFixed(2), unit:'lbs', reason:'Raise pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) });
+    }
+  }
   if (current.ta < desired.ta - 5) { recs.push({ chem:'Sodium Bicarbonate', amount:+(((desired.ta - current.ta)/10)*1.4*vf).toFixed(2), unit:'lbs', reason:'Raise TA ' + current.ta + ' → ' + desired.ta + ' ppm' }); }
-  if (current.ta > desired.ta + 20) { recs.push({ chem:'Muriatic Acid + Aerate', amount:null, unit:'', reason:'TA ' + current.ta + ' is high — add acid & aerate to degas CO₂' }); }
   if (current.ch < desired.ch - 25) { recs.push({ chem:'Calcium Chloride (94%)', amount:+(((desired.ch - current.ch)/10)*1.004*vf).toFixed(2), unit:'lbs', reason:'Raise CH ' + current.ch + ' → ' + desired.ch + ' ppm' }); }
   if (current.cya < desired.cya - 5) { recs.push({ chem:'CYA / Stabilizer', amount:+(((desired.cya - current.cya)/10)*0.833*vf).toFixed(2), unit:'lbs', reason:'Raise CYA ' + current.cya + ' → ' + desired.cya + ' ppm' }); }
   if (current.fc < desired.fc - 0.5) { recs.push({ chem:'Cal-Hypo (65-68%)', amount:+((desired.fc - current.fc)*2.07*vf).toFixed(2), unit:'oz', reason:'Raise FC ' + current.fc.toFixed(1) + ' → ' + desired.fc.toFixed(1) + ' ppm' }); }
@@ -190,8 +205,20 @@ function SWPCustomerChemistryApp() {
   function initVals() { var o = {}; PARAMS.concat(EXTRA_PARAMS).forEach(function(p){o[p.key]=p.dflt;}); return o; }
   var _cur = useState(initVals), current = _cur[0], setCurrent = _cur[1];
   var _des = useState(initVals), desired = _des[0], setDesired = _des[1];
-  var updateCurrent = useCallback(function(key,val){setCurrent(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});}, []);
-  var updateDesired = useCallback(function(key,val){setDesired(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});}, []);
+  // Tracks which Target fields the customer has manually adjusted — those stop mirroring current
+  var desiredTouched = useRef({});
+  var updateCurrent = useCallback(function(key,val){
+    setCurrent(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});
+    // Live-mirror current → target unless the customer has set that target value themselves
+    // (temp is handled by its own mirror effect below)
+    if (key !== 'temp' && !desiredTouched.current[key]) {
+      setDesired(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});
+    }
+  }, []);
+  var updateDesired = useCallback(function(key,val){
+    desiredTouched.current[key] = true;
+    setDesired(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});
+  }, []);
   var updateVolInput = useCallback(function(key,val){setVolInputs(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});}, []);
   var calcVol = useMemo(function(){
     var v = volInputs, GAL = 7.48;
@@ -242,7 +269,11 @@ function SWPCustomerChemistryApp() {
           var saved = localStorage.getItem('swp_cust_readings_' + poolJob.number);
           if (saved) {
             var parsed = JSON.parse(saved);
-            if (parsed.current) setCurrent(parsed.current);
+            if (parsed.current) {
+              setCurrent(parsed.current);
+              // Mirror restored readings into Target too (temp has its own mirror effect; salt target is handled by the Salt default effect)
+              setDesired(function(prev){ var n = Object.assign({}, prev); Object.keys(parsed.current).forEach(function(k){ if (k !== 'temp' && k !== 'tds' && !desiredTouched.current[k]) { n[k] = parsed.current[k]; } }); return n; });
+            }
           }
         } catch(e) {}
         setAuthed(true);
@@ -569,7 +600,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.3 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.4 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
