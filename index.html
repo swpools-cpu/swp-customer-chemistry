@@ -94,7 +94,7 @@ var EXTRA_PARAMS = [
   { key:'fc', label:'Chlorine', min:0, max:20, step:0.25, dflt:3.5, decimals:2 },
   { key:'phos', label:'Phosphate', min:0, max:5000, step:100, dflt:0 },
 ];
-function calcLSI(vals) { var carbAlk = Math.max(vals.ta - Math.round(vals.cya / 3), 5); var TF = interp(TEMP_TABLE, vals.temp); var CF = interp(CH_TABLE, Math.max(vals.ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5)); var lsi = +(vals.pH + TF + CF + AF - 12.1).toFixed(2); return { lsi:lsi, TF:TF, CF:CF, AF:AF, carbAlk:carbAlk }; }
+function calcLSI(vals) { var carbAlk = Math.max(vals.ta - Math.round(vals.cya / 3), 5); var TF = interp(TEMP_TABLE, vals.temp); var CF = interp(CH_TABLE, Math.max(vals.ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5)); var TDSf = vals.tds >= 1000 ? 12.2 : 12.1; var lsi = +(vals.pH + TF + CF + AF - TDSf).toFixed(2); return { lsi:lsi, TF:TF, CF:CF, AF:AF, carbAlk:carbAlk, TDSf:TDSf }; }
 function calcDosing(current, desired, volume, sanitizerType) {
   var vf = volume / 10000; var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5); var recs = [];
   var loweringTA = current.ta > desired.ta + 10;
@@ -503,7 +503,7 @@ function SWPCustomerChemistryApp() {
           {dosing.map(function(d,i){return <div key={i} style={S.doseItem}><div style={S.doseChem}>{d.chem}</div>{d.amount!=null && <div style={S.doseAmt}>{d.amount} {d.unit}</div>}<div style={S.doseReason}>{d.reason}</div></div>;})}
         </div>}
         {tab==='factors' && <div>
-          <div style={{fontSize:12,color:B.grayMid,marginBottom:8}}>LSI = pH + TF + CF + AF - 12.1</div>
+          <div style={{fontSize:12,color:B.grayMid,marginBottom:8}}>LSI = pH + TF + CF + AF - TDSf (12.1, or 12.2 when TDS/salt is 1,000+ ppm)</div>
           <div style={{display:'flex',gap:12}}>
             <div style={{flex:1}}>
               <div style={Object.assign({},S.colHeader,{marginBottom:8})}>Current</div>
@@ -511,6 +511,7 @@ function SWPCustomerChemistryApp() {
               <div style={S.factorRow}><span>Temp Factor</span><span style={S.factorVal}>{currentLSI.TF.toFixed(2)}</span></div>
               <div style={S.factorRow}><span>Calcium Factor</span><span style={S.factorVal}>{currentLSI.CF.toFixed(2)}</span></div>
               <div style={S.factorRow}><span>Alk Factor</span><span style={S.factorVal}>{currentLSI.AF.toFixed(2)}</span></div>
+              <div style={S.factorRow}><span>TDS Factor</span><span style={S.factorVal}>{currentLSI.TDSf.toFixed(1)}</span></div>
               <div style={S.factorRow}><span>Carb Alk</span><span style={S.factorVal}>{currentLSI.carbAlk}</span></div>
               <div style={Object.assign({},S.factorRow,{borderTop:'1px solid '+B.navyLight,paddingTop:6,marginTop:4})}><span style={{fontWeight:700}}>LSI</span><span style={{fontWeight:800,color:currentMeta.color}}>{currentLSI.lsi.toFixed(2)}</span></div>
             </div>
@@ -521,6 +522,7 @@ function SWPCustomerChemistryApp() {
               <div style={S.factorRow}><span>Temp Factor</span><span style={S.factorVal}>{desiredLSI.TF.toFixed(2)}</span></div>
               <div style={S.factorRow}><span>Calcium Factor</span><span style={S.factorVal}>{desiredLSI.CF.toFixed(2)}</span></div>
               <div style={S.factorRow}><span>Alk Factor</span><span style={S.factorVal}>{desiredLSI.AF.toFixed(2)}</span></div>
+              <div style={S.factorRow}><span>TDS Factor</span><span style={S.factorVal}>{desiredLSI.TDSf.toFixed(1)}</span></div>
               <div style={S.factorRow}><span>Carb Alk</span><span style={S.factorVal}>{desiredLSI.carbAlk}</span></div>
               <div style={Object.assign({},S.factorRow,{borderTop:'1px solid '+B.navyLight,paddingTop:6,marginTop:4})}><span style={{fontWeight:700}}>LSI</span><span style={{fontWeight:800,color:desiredMeta.color}}>{desiredLSI.lsi.toFixed(2)}</span></div>
             </div>
@@ -600,7 +602,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.4 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.5 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
