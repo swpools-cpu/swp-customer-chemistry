@@ -122,9 +122,24 @@ function calcDosing(current, desired, volume, sanitizerType) {
   if (sanitizerType === 'Salt' && current.tds < desired.tds - 200) { recs.push({ chem:'Pool Salt (NaCl)', amount:+(((desired.tds - current.tds)/100)*8.345*vf).toFixed(1), unit:'lbs', reason:'Raise salt ' + current.tds + ' → ' + desired.tds + ' ppm' }); }
   return recs;
 }
+var ACID_UNIT_FLOZ = { floz:1, qt:32, gal:128 };
+function acidToFloz(amt, unit) { var n = parseFloat(amt); if (isNaN(n) || n < 0) return 0; return n * (ACID_UNIT_FLOZ[unit] || 1); }
+// Predict how a dose of 31.45% muriatic acid changes pH (immediate) and TA (permanent). Same
+// calibrations as calcDosing (TA 26 fl oz/10ppm/10k; pH via carbAlk). pH drop rebounds with aeration.
+function calcAcidImpact(current, acidOz, volume) {
+  var vf = volume / 10000;
+  if (!acidOz || acidOz <= 0 || vf <= 0) return null;
+  var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5);
+  var taDrop = +((acidOz / (26 * vf)) * 10).toFixed(0);
+  var newTA = Math.max(0, current.ta - taDrop);
+  var pHDrop = +(acidOz / ((5.317 + 0.2495 * carbAlk) * vf)).toFixed(2);
+  var newPH = +(current.pH - pHDrop).toFixed(2);
+  var newLSI = calcLSI(Object.assign({}, current, { pH: Math.max(newPH, 0), ta: newTA })).lsi;
+  return { taDrop:taDrop, newTA:newTA, pHDrop:pHDrop, newPH:newPH, newLSI:newLSI };
+}
 function lsiMeta(lsi) { if (lsi <= -0.31) return { label:'CORROSIVE', color:'#d9534f', bg:'#d9534f' }; if (lsi <= -0.01) return { label:'ACCEPTABLE', color:'#f0ad4e', bg:'#f0ad4e' }; if (lsi <= 0.30) return { label:'BALANCED', color:'#5cb85c', bg:'#5cb85c' }; return { label:'SCALE FORMING', color:'#9b59b6', bg:'#9b59b6' }; }
 function phCeiling(ta, cya) { var carbAlk = Math.max(ta - Math.round(cya / 3), 5); return +(Math.min(8.4, 7.5 + (carbAlk - 80) * 0.005)).toFixed(2); }
-function tdsLabel(sanitizerType) { return sanitizerType === 'Salt' ? 'Salt Level' : 'TDS'; }
+function tdsLabel(sanitizerType) { return sanitizerType === 'Salt' ? 'Salt Level/TDS' : 'TDS'; }
 var S = {
   app: { fontFamily:"'Jost',sans-serif", background:B.navy, minHeight:'100vh', maxWidth:440, margin:'0 auto', color:B.white, position:'relative', paddingBottom:20 },
   header: { background:'linear-gradient(135deg, '+B.blue+' 0%, '+B.teal+' 100%)', padding:'16px 20px 14px', display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', borderRadius:'0 0 16px 16px' },
@@ -207,6 +222,11 @@ function SWPCustomerChemistryApp() {
   var _des = useState(initVals), desired = _des[0], setDesired = _des[1];
   // Tracks which Target fields the customer has manually adjusted — those stop mirroring current
   var desiredTouched = useRef({});
+  // Acid impact preview state
+  var _acid = useState(''), acidAmt = _acid[0], setAcidAmt = _acid[1];
+  var _acidU = useState('floz'), acidUnit = _acidU[0], setAcidUnit = _acidU[1];
+  // Guide tab sub-section
+  var _gs = useState('how'), guideSec = _gs[0], setGuideSec = _gs[1];
   var updateCurrent = useCallback(function(key,val){
     setCurrent(function(prev){var n=Object.assign({},prev);n[key]=val;return n;});
     // Live-mirror current → target unless the customer has set that target value themselves
@@ -227,9 +247,6 @@ function SWPCustomerChemistryApp() {
     var avgD2=(v.deepDepth+v.shallowDepth)/2;
     return +(v.length*v.width*avgD2*GAL).toFixed(0);
   }, [volShape, volInputs]);
-  useEffect(function(){
-    if (sanitizerType === 'Salt' && desired.tds === 0) { updateDesired('tds', 3200); }
-  }, [sanitizerType]);
   // Water temp can't be dosed — desired temp mirrors current temp
   useEffect(function(){
     setDesired(function(prev){ if (prev.temp === current.temp) return prev; var n = Object.assign({}, prev); n.temp = current.temp; return n; });
@@ -240,6 +257,20 @@ function SWPCustomerChemistryApp() {
   var desiredMeta = lsiMeta(desiredLSI.lsi);
   var currentCeiling = phCeiling(current.ta, current.cya);
   var dosing = useMemo(function(){return calcDosing(current,desired,volume,sanitizerType);}, [current,desired,volume,sanitizerType]);
+  var recAcidOz = useMemo(function(){ var m = dosing.find(function(d){ return d.chem && d.chem.indexOf('Muriatic Acid') === 0 && d.amount; }); return m ? m.amount : 0; }, [dosing]);
+  var effAcidOz = acidAmt !== '' ? acidToFloz(acidAmt, acidUnit) : recAcidOz;
+  var acidImpact = useMemo(function(){ return calcAcidImpact(current, effAcidOz, volume); }, [current, effAcidOz, volume]);
+  var acidTile = {flex:1,textAlign:'center',background:B.navy,borderRadius:8,padding:'8px 4px'};
+  var acidTileLbl = {fontSize:10,color:B.grayMid,marginBottom:3,lineHeight:1.1};
+  var acidTileVal = {fontSize:20,fontWeight:800,lineHeight:1};
+  var acidTileSub = {fontSize:10,color:B.grayDim,marginTop:3};
+  // Orenda maintenance dosing scaled to this pool (homeowner rates, per Orenda labels)
+  var careRecs = useMemo(function(){var vf=volume/10000;return [
+    {name:'SC-1000 — Scale & Stain Control', dose:(vf*3).toFixed(0)+' fl oz / week', note:'Pour into the skimmer with the pump running. Holds calcium and metals in solution so they can’t scale or stain.'},
+    {name:'CV-600 Enzyme', dose:(vf*3).toFixed(0)+' fl oz / week', note:'Digests oils, sunscreen, and organics so chlorine can focus on sanitizing. Busy pool? Up to '+(vf*5).toFixed(0)+' fl oz.'},
+    {name:'CE-Clarifier + Enzyme', dose:(vf*1).toFixed(0)+' fl oz / week', note:'Spray onto the water surface (not the skimmer) for crystal-clear water. Use CV-600 OR CE-Clarifier — CE already contains enzyme.'},
+    {name:'PR-10,000 — Phosphate Remover', dose:'As needed', note:'When phosphates rise above 500 ppb. Max 4 fl oz per 10,000 gal at a time. Pour around the pool edge, not the skimmer.'},
+  ];}, [volume]);
   var currentTdsLabel = tdsLabel(sanitizerType);
   function getParamLabel(p) { if (p.key === 'tds') return currentTdsLabel; return p.label; }
   useEffect(function(){ setVolumeStr(String(volume)); }, [volume]);
@@ -271,8 +302,8 @@ function SWPCustomerChemistryApp() {
             var parsed = JSON.parse(saved);
             if (parsed.current) {
               setCurrent(parsed.current);
-              // Mirror restored readings into Target too (temp has its own mirror effect; salt target is handled by the Salt default effect)
-              setDesired(function(prev){ var n = Object.assign({}, prev); Object.keys(parsed.current).forEach(function(k){ if (k !== 'temp' && k !== 'tds' && !desiredTouched.current[k]) { n[k] = parsed.current[k]; } }); return n; });
+              // Mirror restored readings into Target too (temp has its own mirror effect; salt/TDS now mirrors like every other reading)
+              setDesired(function(prev){ var n = Object.assign({}, prev); Object.keys(parsed.current).forEach(function(k){ if (k !== 'temp' && !desiredTouched.current[k]) { n[k] = parsed.current[k]; } }); return n; });
             }
           }
         } catch(e) {}
@@ -494,6 +525,7 @@ function SWPCustomerChemistryApp() {
       <div style={S.tabBar}>
         <button style={tabBtnStyle(tab==='dosing')} onClick={function(){setTab('dosing');}}>Dosing</button>
         <button style={tabBtnStyle(tab==='factors')} onClick={function(){setTab('factors');}}>Factors</button>
+        <button style={tabBtnStyle(tab==='guide')} onClick={function(){setTab('guide');}}>Guide</button>
         <button style={tabBtnStyle(tab==='info')} onClick={function(){setTab('info');}}>LSI Info</button>
         <button style={tabBtnStyle(tab==='volume')} onClick={function(){setTab('volume');}}>Volume</button>
       </div>
@@ -501,6 +533,25 @@ function SWPCustomerChemistryApp() {
         {tab==='dosing' && <div>
           {dosing.length===0 && <div style={Object.assign({},S.doseItem,{textAlign:'center'})}><div style={Object.assign({},S.doseChem,{color:'#5cb85c'})}>Your water is balanced!</div></div>}
           {dosing.map(function(d,i){return <div key={i} style={S.doseItem}><div style={S.doseChem}>{d.chem}</div>{d.amount!=null && <div style={S.doseAmt}>{d.amount} {d.unit}</div>}<div style={S.doseReason}>{d.reason}</div></div>;})}
+          <div style={Object.assign({},S.doseItem,{marginTop:14,border:'1px solid '+B.tealDim,background:B.navyMid})}>
+            <div style={{fontSize:13,fontWeight:700,color:B.teal,marginBottom:2}}>Acid Impact Preview</div>
+            <div style={{fontSize:11,color:B.grayMid,marginBottom:10,lineHeight:1.4}}>See how a dose of muriatic acid (31.45%) would change your pH and alkalinity in {volume.toLocaleString()} gal.</div>
+            <div style={{display:'flex',gap:8,alignItems:'stretch',marginBottom:8}}>
+              <input type="number" inputMode="decimal" value={acidAmt} placeholder={recAcidOz ? String(recAcidOz) : '0'} onChange={function(e){setAcidAmt(e.target.value);}} style={{flex:1,minWidth:0,padding:'10px 12px',borderRadius:8,border:'1px solid '+B.navyLight,background:B.navy,color:B.white,fontSize:16,fontFamily:"'Jost',sans-serif",fontWeight:700}} />
+              <div style={{display:'flex',gap:4}}>
+                {[['floz','fl oz'],['qt','qt'],['gal','gal']].map(function(u){ var active=acidUnit===u[0]; return <button key={u[0]} onClick={function(){setAcidUnit(u[0]);}} style={{padding:'0 12px',borderRadius:8,border:'1px solid '+(active?B.teal:B.navyLight),background:active?B.teal:'transparent',color:active?B.white:B.grayMid,fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:"'Jost',sans-serif"}}>{u[1]}</button>; })}
+              </div>
+            </div>
+            {acidAmt==='' && recAcidOz>0 && <div style={{fontSize:11,color:B.grayDim,marginBottom:8}}>Showing your recommended {recAcidOz} fl oz dose. Type an amount to try a different one.</div>}
+            {acidImpact ? <Fragment>
+              <div style={{display:'flex',gap:8,marginBottom:8}}>
+                <div style={acidTile}><div style={acidTileLbl}>pH (right after)</div><div style={Object.assign({},acidTileVal,{color:B.white})}>{acidImpact.newPH.toFixed(1)}</div><div style={acidTileSub}>was {current.pH.toFixed(1)}</div></div>
+                <div style={acidTile}><div style={acidTileLbl}>Alkalinity</div><div style={Object.assign({},acidTileVal,{color:B.white})}>{acidImpact.newTA}</div><div style={acidTileSub}>was {current.ta}</div></div>
+                <div style={acidTile}><div style={acidTileLbl}>Resulting LSI</div><div style={Object.assign({},acidTileVal,{color:lsiMeta(acidImpact.newLSI).color})}>{(acidImpact.newLSI>=0?'+':'')+acidImpact.newLSI.toFixed(2)}</div><div style={acidTileSub}>{lsiMeta(acidImpact.newLSI).label}</div></div>
+              </div>
+              <div style={{fontSize:11,color:B.gray,lineHeight:1.45,background:B.navy,borderRadius:8,padding:'8px 10px'}}>This drops alkalinity about {acidImpact.taDrop} ppm (it stays down) and pH about {acidImpact.pHDrop.toFixed(1)} the moment you add it. As the pump runs and the water aerates, pH rises back toward where it started while alkalinity stays lower {'—'} that's the right way to bring alkalinity down. Always add acid with the pump running, poured slowly around the deep end, and never mix chemicals together.</div>
+            </Fragment> : <div style={{fontSize:12,color:B.grayMid}}>Enter an acid amount to preview its effect.</div>}
+          </div>
         </div>}
         {tab==='factors' && <div>
           <div style={{fontSize:12,color:B.grayMid,marginBottom:8}}>LSI = pH + TF + CF + AF - TDSf (12.1, or 12.2 when TDS/salt is 1,000+ ppm)</div>
@@ -527,6 +578,35 @@ function SWPCustomerChemistryApp() {
               <div style={Object.assign({},S.factorRow,{borderTop:'1px solid '+B.navyLight,paddingTop:6,marginTop:4})}><span style={{fontWeight:700}}>LSI</span><span style={{fontWeight:800,color:desiredMeta.color}}>{desiredLSI.lsi.toFixed(2)}</span></div>
             </div>
           </div>
+        </div>}
+        {tab==='guide' && <div>
+          <div style={{display:'flex',gap:6,marginBottom:14}}>
+            {[['how','How-To'],['care','Orenda Care']].map(function(g){ var active=guideSec===g[0]; return <button key={g[0]} onClick={function(){setGuideSec(g[0]);}} style={{flex:1,padding:'8px 4px',borderRadius:8,border:'1px solid '+(active?B.teal:B.navyLight),background:active?B.teal:'transparent',color:active?B.white:B.grayMid,fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:"'Jost',sans-serif"}}>{g[1]}</button>; })}
+          </div>
+          {guideSec==='how' && <div>
+            <div style={{fontSize:13,fontWeight:700,color:B.white,marginBottom:10}}>How to use My Pool</div>
+            {[
+              ['1','Log in with your job number','It’s on your Southwest Pools invoice or portal. Your pool size, sanitizer, and filter type load in automatically.'],
+              ['2','Enter your test readings','Under “Current,” type pH, alkalinity, calcium, CYA (stabilizer), chlorine, salt/TDS, and water temp. A good test kit (like a Taylor K-2006) gives the best results.'],
+              ['3','Check the LSI dial','Green = balanced and protecting your pool. Red = corrosive (can etch plaster). Purple = scale-forming.'],
+              ['4','Adjust your Target if needed','Targets auto-fill to match what you entered. Change any target and the Dosing tab updates instantly.'],
+              ['5','Open the Dosing tab','See exactly what to add and how much, scaled to your pool. Try the Acid Impact Preview to see how acid changes pH and alkalinity before you add it.'],
+              ['6','Add chemicals the right way','One at a time, pump running, poured slowly around the deep end. Let it circulate, then retest — don’t chase readings.'],
+              ['7','Save your results','Tap Save to send your readings and photos to your Southwest Pools team.'],
+            ].map(function(s){return <div key={s[0]} style={{display:'flex',gap:10,marginBottom:12}}>
+              <div style={{flexShrink:0,width:24,height:24,borderRadius:12,background:B.teal,color:B.white,fontSize:13,fontWeight:800,display:'flex',alignItems:'center',justifyContent:'center'}}>{s[0]}</div>
+              <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:B.white,marginBottom:2}}>{s[1]}</div><div style={{fontSize:12,color:B.gray,lineHeight:1.45}}>{s[2]}</div></div>
+            </div>;})}
+            <div style={{fontSize:11,color:B.gray,lineHeight:1.5,background:B.navyMid,border:'1px solid '+B.lsiYellow+'55',borderRadius:10,padding:'10px 12px',marginTop:6}}>
+              <strong style={{color:B.lsiYellow}}>Safety first:</strong> Never mix chemicals together. Always add chemical to water, never water to chemical. Store acid and chlorine separately, and keep everything away from kids and pets.
+            </div>
+          </div>}
+          {guideSec==='care' && <div>
+            <div style={{fontSize:13,fontWeight:700,color:B.white,marginBottom:4}}>Orenda Water Care</div>
+            <div style={{fontSize:12,color:B.gray,lineHeight:1.5,marginBottom:12}}>Southwest Pools uses the Orenda program — a proactive approach that keeps water balanced and clear with less chlorine. Below are homeowner maintenance doses scaled to your {volume.toLocaleString()}-gallon pool.</div>
+            {careRecs.map(function(r,i){return <div key={i} style={S.doseItem}><div style={S.doseChem}>{r.name}</div><div style={S.doseAmt}>{r.dose}</div><div style={S.doseReason}>{r.note}</div></div>;})}
+            <div style={{fontSize:11,color:B.grayDim,lineHeight:1.5,marginTop:8}}>Add SC-1000 first and let it circulate before other chemicals. Questions about the Orenda program or home delivery? Ask your Southwest Pools team.</div>
+          </div>}
         </div>}
         {tab==='info' && <div>
           <div style={{fontSize:13,fontWeight:700,color:B.white,marginBottom:10}}>What is LSI?</div>
@@ -602,7 +682,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.2.5 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.3.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
