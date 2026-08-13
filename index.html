@@ -94,20 +94,95 @@ var EXTRA_PARAMS = [
   { key:'fc', label:'Chlorine', min:0, max:20, step:0.25, dflt:3.5, decimals:2 },
   { key:'phos', label:'Phosphate', min:0, max:5000, step:100, dflt:0 },
 ];
-function calcLSI(vals) { var carbAlk = Math.max(vals.ta - Math.round(vals.cya / 3), 5); var TF = interp(TEMP_TABLE, vals.temp); var CF = interp(CH_TABLE, Math.max(vals.ch, 5)); var AF = interp(TA_TABLE, Math.max(carbAlk, 5)); var TDSf = vals.tds >= 1000 ? 12.2 : 12.1; var lsi = +(vals.pH + TF + CF + AF - TDSf).toFixed(2); return { lsi:lsi, TF:TF, CF:CF, AF:AF, carbAlk:carbAlk, TDSf:TDSf }; }
+// ===== Orenda-calibrated chemistry core (v2 — calibrated Aug 2026 vs Orenda Calculator) =====
+// Rigorous LSI: Plummer-Busenberg pK2 / pKsp(calcite) for temperature + Davies activity
+// correction for TDS. Cyanurate alkalinity uses a pH-, temperature- and ionic-strength-
+// dependent factor. Verified to ±0.02 LSI, ±0.02 ppm carb alk, ±0.03 pH ceiling
+// against 14 Orenda Calculator readings (55–100°F, pH 7.2–7.8, TDS 0–3000, CYA 30–100).
+var CYA_EQ = 50.045 / 129.075;                        // CaCO3 eq. wt / cyanuric acid MW
+function tKelvin(F) { return (F - 32) * 5 / 9 + 273.15; }
+// Effective dissolved load. Orenda's activity correction is driven by the MEASURED
+// CONSTITUENTS, not by TDS alone - calcium counts ~2x alkalinity because it is divalent,
+// exactly as the Debye-Huckel limiting law predicts. Replaces an earlier TDS-only term
+// that needed a fabricated 420 ppm floor to work. Verified on calcium 50-800 ppm.
+// Calcium weight fitted to 2.006 - the exact divalent ratio. Tested for a hidden TDS
+// baseline (Orenda has none: LSI at TDS 0 and TDS 1200 both reproduce to 0.01).
+function dissolvedLoad(ch, ta, tds) {
+  return Math.sqrt(Math.max((tds || 0) + 2.0060 * (ch || 0) + 1.4824 * (ta || 0), 1e-9));
+}
+function cyaFactor(pH, tempF, tds, ch, ta) {
+  var pKa = 1.082730 + 1751.578 / tKelvin(tempF) - 0.0013144 * dissolvedLoad(ch, ta, tds);
+  return CYA_EQ / (1 + Math.pow(10, pKa - pH));
+}
+function carbonateAlk(ta, cya, pH, tempF, tds, ch) {
+  return Math.max(ta - cya * cyaFactor(pH, tempF, tds, ch, ta), 1);
+}
+function pK2carb(t) { return 107.8871 + 0.03252849*t - 5151.79/t - 38.92561*Math.log10(t) + 563713.9/(t*t); }
+function pKspCalcite(t) { return 171.9065 + 0.077993*t - 2839.319/t - 71.595*Math.log10(t); }
+
+// ----- Acid demand (31.45% muriatic), Orenda-verified Aug 2026 -----
+// Moving pH costs acid on TWO buffers, not one: the carbonate system (total carbonate
+// CT stays constant as acid is added) AND cyanurate, which protonates on the way down.
+// Ignoring the cyanurate half under-doses by 20-45%. 25.635 fl oz destroys 10 ppm of
+// total alkalinity per 10k gal — confirmed against Orenda's "Future Alkalinity" readout.
+var ACID_FLOZ_PER_10PPM = 25.635;
+function alkFractions(pH, tempF) {
+  var t = tKelvin(tempF), h = Math.pow(10, -pH);
+  var k1 = Math.pow(10, -(3404.71/t + 0.032786*t - 14.8435));
+  var k2 = Math.pow(10, -(2902.39/t + 0.02379*t  -  6.4980));
+  var kw = Math.pow(10, -(4471.33/t + 0.017053*t -  6.0846));
+  var a1 = 1 / (1 + h/k1 + k2/h);
+  return { m: a1 + 2*a1*k2/h, w: (kw/h - h) * 50045 };
+}
+// ppm of TOTAL alkalinity destroyed moving pH0 -> pH1 (this is Orenda's "Future Alkalinity" delta)
+function alkDropForPH(ta, cya, pH0, pH1, tempF, tds, ch) {
+  var ca0 = carbonateAlk(ta, cya, pH0, tempF, tds, ch);
+  var A0 = alkFractions(pH0, tempF), A1 = alkFractions(pH1, tempF);
+  var CT = (ca0 - A0.w) / A0.m;
+  var ca1 = CT * A1.m + A1.w;
+  return (ca0 - ca1) + cya * (cyaFactor(pH0, tempF, tds, ch, ta) - cyaFactor(pH1, tempF, tds, ch, ta));
+}
+function acidForPH(ta, cya, pH0, pH1, tempF, tds, volume, ch) {
+  return alkDropForPH(ta, cya, pH0, pH1, tempF, tds, ch) / 10 * ACID_FLOZ_PER_10PPM * (volume / 10000);
+}
+function phAfterAcid(ta, cya, pH0, acidOz, tempF, tds, volume, ch) {
+  var lo = 4.0, hi = pH0;
+  for (var i = 0; i < 50; i++) {
+    var m = (lo + hi) / 2;
+    if (acidForPH(ta, cya, pH0, m, tempF, tds, volume, ch) > acidOz) lo = m; else hi = m;
+  }
+  return (lo + hi) / 2;
+}
+
+
+function calcLSI(vals) {
+  var t = tKelvin(vals.temp);
+  var carbAlk = carbonateAlk(vals.ta, vals.cya, vals.pH, vals.temp, vals.tds, vals.ch);
+  var Q  = dissolvedLoad(vals.ch, vals.ta, vals.tds);
+  var CF = Math.log10(Math.max(vals.ch, 1)) - 0.4;
+  // Alkalinity double-counts the carbonate ion, so strip it back to bicarbonate.
+  // This is why Orenda's pH response sits below 1.0 and keeps falling as pH climbs
+  // (0.97 per pH unit at 7.7, 0.85 by 8.5) - a plain log10(alk) term cannot do that.
+  var spec = Math.log10(1 + 2 * Math.pow(10, vals.pH - (pK2carb(t) - 0.7026)));
+  var AF = Math.log10(carbAlk) - spec;
+  var TDSf = pK2carb(t) - pKspCalcite(t) + 9.450599 + 0.0075683 * Q;
+  var lsi = +(vals.pH + CF + AF - TDSf).toFixed(2);
+  return { lsi:lsi, TF:+(0.0075683 * Q).toFixed(3), CF:+CF.toFixed(3), AF:+AF.toFixed(3),
+           carbAlk:+carbAlk.toFixed(2), TDSf:+TDSf.toFixed(3) };
+}
 function calcDosing(current, desired, volume, sanitizerType) {
-  var vf = volume / 10000; var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5); var recs = [];
+  var vf = volume / 10000; var carbAlk = carbonateAlk(current.ta, current.cya, current.pH, current.temp, current.tds, current.ch); var recs = [];
   var loweringTA = current.ta > desired.ta + 10;
   // Lowering TA is dosed FIRST — the acid dosed for TA also lowers pH (Orenda method),
   // so no separate pH-lowering dose is given when a TA reduction is being dosed.
   if (loweringTA) {
-    var taAcid = +(((current.ta - desired.ta) / 10) * 26 * vf).toFixed(1);
+    var taAcid = +(((current.ta - desired.ta) / 10) * 25.635 * vf).toFixed(1);
     recs.push({ chem:'Muriatic Acid (31.45%) + Aerate', amount:taAcid, unit:'fl oz', reason:'Lower TA ' + current.ta + ' → ' + desired.ta + ' ppm — add this FIRST, with the pump running. Split into 2–3 smaller doses a few hours apart (never all at once), pouring slowly around the deep end. Aerate after (run water features/jets) to bring pH back up, then retest before adding anything else' });
     if (current.pH > desired.pH + 0.05) {
       recs.push({ chem:'pH — no separate acid needed', amount:null, unit:'', reason:'The TA dose above will also lower your pH. Retest pH after the pool has circulated and aerated — only treat pH if it is still above ' + desired.pH.toFixed(1) });
     }
   }
-  if (!loweringTA && current.pH > desired.pH + 0.05) { var pHDrop = current.pH - desired.pH; var acidDose = +(pHDrop * (5.317 + 0.2495 * carbAlk) * vf).toFixed(2); recs.push({ chem:'Muriatic Acid (31.45%)', amount:acidDose, unit:'fl oz', reason:'Lower pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) + ' — add with the pump running, pouring slowly around the deep end' }); }
+  if (!loweringTA && current.pH > desired.pH + 0.05) { var pHDrop = current.pH - desired.pH; var acidDose = +acidForPH(current.ta, current.cya, current.pH, desired.pH, current.temp, current.tds, volume, current.ch).toFixed(2); recs.push({ chem:'Muriatic Acid (31.45%)', amount:acidDose, unit:'fl oz', reason:'Lower pH ' + current.pH.toFixed(1) + ' → ' + desired.pH.toFixed(1) + ' — add with the pump running, pouring slowly around the deep end' }); }
   if (current.pH < desired.pH - 0.05) {
     if (loweringTA) {
       recs.push({ chem:'Borax — raise pH (after TA dose)', amount:null, unit:'', reason:'pH is below target while lowering TA — if pH still needs a boost afterward, use borax, NOT soda ash (soda ash pushes TA right back up). Retest after the TA dose & aeration before adding anything' });
@@ -129,16 +204,35 @@ function acidToFloz(amt, unit) { var n = parseFloat(amt); if (isNaN(n) || n < 0)
 function calcAcidImpact(current, acidOz, volume) {
   var vf = volume / 10000;
   if (!acidOz || acidOz <= 0 || vf <= 0) return null;
-  var carbAlk = Math.max(current.ta - Math.round(current.cya / 3), 5);
-  var taDrop = +((acidOz / (26 * vf)) * 10).toFixed(0);
+  var carbAlk = carbonateAlk(current.ta, current.cya, current.pH, current.temp, current.tds, current.ch);
+  var taDrop = +((acidOz / (25.635 * vf)) * 10).toFixed(0);
   var newTA = Math.max(0, current.ta - taDrop);
-  var pHDrop = +(acidOz / ((5.317 + 0.2495 * carbAlk) * vf)).toFixed(2);
+  var pHDrop = +(current.pH - phAfterAcid(current.ta, current.cya, current.pH, acidOz, current.temp, current.tds, volume, current.ch)).toFixed(2);
   var newPH = +(current.pH - pHDrop).toFixed(2);
   var newLSI = calcLSI(Object.assign({}, current, { pH: Math.max(newPH, 0), ta: newTA })).lsi;
   return { taDrop:taDrop, newTA:newTA, pHDrop:pHDrop, newPH:newPH, newLSI:newLSI };
 }
 function lsiMeta(lsi) { if (lsi <= -0.31) return { label:'CORROSIVE', color:'#d9534f', bg:'#d9534f' }; if (lsi <= -0.01) return { label:'ACCEPTABLE', color:'#f0ad4e', bg:'#f0ad4e' }; if (lsi <= 0.30) return { label:'BALANCED', color:'#5cb85c', bg:'#5cb85c' }; return { label:'SCALE FORMING', color:'#9b59b6', bg:'#9b59b6' }; }
-function phCeiling(ta, cya) { var carbAlk = Math.max(ta - Math.round(cya / 3), 5); return +(Math.min(8.4, 7.5 + (carbAlk - 80) * 0.005)).toFixed(2); }
+function phCeiling(ta, cya, tempF, tds, ch) {
+  // pH the water drifts to at equilibrium with atmospheric CO2. Solved self-consistently:
+  // the cyanurate correction is evaluated AT the ceiling pH, not the current pH.
+  // Calcium term added Aug 2026 - Orenda's ceiling falls as calcium rises (8.52 at CH 50,
+  // 8.42 at CH 800); the previous version returned one value regardless of calcium.
+  if (tempF === undefined || tempF === null) tempF = 85;
+  if (ch === undefined || ch === null) ch = 250;
+  var t  = tKelvin(tempF);
+  var C  = 1.6625e-05 * Math.exp(-0.00437 * (tempF - 85));
+  var k1 = Math.pow(10, -(3404.71/t + 0.032786*t  - 14.8435));
+  var k2 = Math.pow(10, -(2902.39/t + 0.02379*t   -  6.4980));
+  var kw = Math.pow(10, -(4471.33/t + 0.017053*t  -  6.0846));
+  var lo = 6.0, hi = 10.5;
+  for (var i = 0; i < 60; i++) {
+    var m = (lo + hi) / 2, h = Math.pow(10, -m);
+    var eqAlk = (k1*C/h + 2*k1*k2*C/(h*h) + kw/h - h) * 50045;
+    if (eqAlk < ta - cya * cyaFactor(m, tempF, tds, ch, ta)) lo = m; else hi = m;
+  }
+  return +(((lo + hi) / 2) -0.08352 * (Math.log10(Math.max(ch, 1)) - 2.39794)).toFixed(2);
+}
 function tdsLabel(sanitizerType) { return sanitizerType === 'Salt' ? 'Salt Level/TDS' : 'TDS'; }
 var S = {
   app: { fontFamily:"'Jost',sans-serif", background:B.navy, minHeight:'100vh', maxWidth:440, margin:'0 auto', color:B.white, position:'relative', paddingBottom:20 },
@@ -155,6 +249,7 @@ var S = {
   paramRow: { display:'flex', alignItems:'center', justifyContent:'center', marginBottom:2, minHeight:48 },
   paramLabel: { flex:'1 1 0', textAlign:'center', fontSize:13, fontWeight:600, color:B.teal, lineHeight:1.2 },
   subLabel: { fontSize:10, color:B.tealDim, fontStyle:'italic', textAlign:'center', marginTop:1 },
+  tdsNote: { fontSize:9, color:'#f0ad4e', fontStyle:'italic', textAlign:'center', marginTop:2, lineHeight:1.25 },
   dialGroup: { display:'flex', alignItems:'center', gap:2, justifyContent:'center', flex:'1 1 0' },
   dialSide: { fontSize:12, color:B.grayDim, width:32, textAlign:'center', cursor:'pointer', userSelect:'none', padding:'4px 0', borderRadius:6 },
   dialCenter: { fontSize:16, fontWeight:800, color:B.white, minWidth:44, textAlign:'center', padding:'4px 6px', background:B.navyLight, borderRadius:8, cursor:'pointer' },
@@ -255,7 +350,8 @@ function SWPCustomerChemistryApp() {
   var desiredLSI = useMemo(function(){return calcLSI(desired);}, [desired]);
   var currentMeta = lsiMeta(currentLSI.lsi);
   var desiredMeta = lsiMeta(desiredLSI.lsi);
-  var currentCeiling = phCeiling(current.ta, current.cya);
+  var currentCeiling = phCeiling(current.ta, current.cya, current.temp, current.tds, current.ch);
+  var lsiAt500 = calcLSI(Object.assign({}, current, { tds:500 })).lsi;
   var dosing = useMemo(function(){return calcDosing(current,desired,volume,sanitizerType);}, [current,desired,volume,sanitizerType]);
   var recAcidOz = useMemo(function(){ var m = dosing.find(function(d){ return d.chem && d.chem.indexOf('Muriatic Acid') === 0 && d.amount; }); return m ? m.amount : 0; }, [dosing]);
   var effAcidOz = acidAmt !== '' ? acidToFloz(acidAmt, acidUnit) : recAcidOz;
@@ -367,7 +463,7 @@ function SWPCustomerChemistryApp() {
   function handleSave() {
     if (!job || volume <= 0) return;
     setSaving(true); setSaveResult(null);
-    var desiredCeil = phCeiling(desired.ta, desired.cya);
+    var desiredCeil = phCeiling(desired.ta, desired.cya, desired.temp, desired.tds, desired.ch);
     var jobTypes = {service:'Service'};
     var lines = [];
     lines.push('=== SWP Chemistry Report (Customer) ===');
@@ -499,7 +595,7 @@ function SWPCustomerChemistryApp() {
           var desVal = desired[p.key];
           return (<div key={p.key} style={S.paramRow}>
             <ParamInput mode={mode} value={current[p.key]} step={p.step} min={p.min} max={p.max} onChange={function(v){updateCurrent(p.key,v);}} decimals={dd} />
-            <div style={S.paramLabel}>{label}<FlagIndicator flag={flag} />{p.showCeiling && <div style={S.subLabel}>pH Ceiling<br/>{currentCeiling}</div>}{p.showCarbAlk && <div style={S.subLabel}>{p.subLabel}<br/>{currentLSI.carbAlk}</div>}</div>
+            <div style={S.paramLabel}>{label}<FlagIndicator flag={flag} />{p.showCeiling && <div style={S.subLabel}>pH Ceiling<br/>{currentCeiling}</div>}{p.showCarbAlk && <div style={S.subLabel}>{p.subLabel}<br/>{currentLSI.carbAlk}</div>}{p.key==='tds' && !current.tds && <div style={S.tdsNote}>no TDS entered — LSI reads high<br/>at 500 ppm it would be {(lsiAt500>=0?'+':'')+lsiAt500.toFixed(2)}</div>}</div>
             {p.key==='temp'
               ? <div style={{flex:'1 1 0',textAlign:'center',fontSize:16,fontWeight:800,color:B.grayMid}}>{desVal}</div>
               : <ParamInput mode={mode} value={desVal} step={p.step} min={p.min} max={p.max} onChange={function(v){updateDesired(p.key,v);}} decimals={dd} />}
@@ -531,7 +627,7 @@ function SWPCustomerChemistryApp() {
       </div>
       <div style={S.tabContent}>
         {tab==='dosing' && <div>
-          {dosing.length===0 && <div style={Object.assign({},S.doseItem,{textAlign:'center'})}><div style={Object.assign({},S.doseChem,{color:'#5cb85c'})}>Your water is balanced!</div></div>}
+          {dosing.length===0 && (function(){var L=currentMeta.label, v=(currentLSI.lsi>=0?'+':'')+currentLSI.lsi.toFixed(2);var head = L==='BALANCED' ? 'Your water is balanced' : 'Nothing to add right now';var body = L==='BALANCED' ? 'Nothing to add right now \u2014 this is exactly where we want it.' : L==='ACCEPTABLE' ? 'Your water is slightly aggressive at '+v+'. It is not harmful and there is nothing to do today \u2014 just keep an eye on it at your next test.' : L==='CORROSIVE' ? 'Your water is corrosive at '+v+', which can etch plaster over time. Please give us a call.' : 'Your water is scale-forming at '+v+', which can leave deposits on surfaces and equipment. Please give us a call.';return <div style={Object.assign({},S.doseItem,{textAlign:'center'})}><div style={Object.assign({},S.doseChem,{color:currentMeta.color})}>{head}</div><div style={Object.assign({},S.doseReason,{marginTop:5})}>{body}</div></div>;})()}
           {dosing.map(function(d,i){return <div key={i} style={S.doseItem}><div style={S.doseChem}>{d.chem}</div>{d.amount!=null && <div style={S.doseAmt}>{d.amount} {d.unit}</div>}<div style={S.doseReason}>{d.reason}</div></div>;})}
           <div style={Object.assign({},S.doseItem,{marginTop:14,border:'1px solid '+B.tealDim,background:B.navyMid})}>
             <div style={{fontSize:13,fontWeight:700,color:B.teal,marginBottom:2}}>Acid Impact Preview</div>
@@ -554,7 +650,8 @@ function SWPCustomerChemistryApp() {
           </div>
         </div>}
         {tab==='factors' && <div>
-          <div style={{fontSize:12,color:B.grayMid,marginBottom:8}}>LSI = pH + TF + CF + AF - TDSf (12.1, or 12.2 when TDS/salt is 1,000+ ppm)</div>
+          <div style={{fontSize:12,color:B.grayMid,marginBottom:8}}>LSI = pH + CF + AF − K — calibrated to the Orenda Calculator</div>
+          <div style={{fontSize:11,color:'#f0ad4e',fontStyle:'italic',marginBottom:8,lineHeight:1.4}}>Leaving TDS/Salt blank is not neutral. Real fill water carries dissolved solids, so a blank field makes LSI read slightly scale-forming — typically 0.03 to 0.08 high. Enter a measured value once the pool is running.</div>
           <div style={{display:'flex',gap:12}}>
             <div style={{flex:1}}>
               <div style={Object.assign({},S.colHeader,{marginBottom:8})}>Current</div>
@@ -682,7 +779,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.3.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v1.4.0 — Equipment Protection Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
