@@ -79,6 +79,86 @@ function myPool(body) {
   return fetch(MYPOOL_FN, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
     .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(d){ if (!r.ok) { var e = new Error(d.error || 'error'); e.status = r.status; throw e; } return d; }); });
 }
+// History download (v2.2.0, Oct 25 2026): spreadsheet (CSV) and printable PDF report of the pool's full history.
+function saveFile(blob, filename) {
+  try {
+    var file = new File([blob], filename, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      return navigator.share({ files: [file], title: filename }).catch(function(){});
+    }
+  } catch(e) {}
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
+  return Promise.resolve();
+}
+function histRows(history, saltLabel) {
+  var head = ['Date','Time','Tested by','Type','Water','LSI','LSI status','pH','Free chlorine','Total alkalinity','Calcium','CYA',saltLabel,'Phosphates','Water temp (F)','Added / notes'];
+  var rows = history.map(function(r){
+    var d = new Date(r.taken_at);
+    var v = function(x){ return (x === null || x === undefined) ? '' : String(Number(x) === Number(x) ? Math.round(Number(x)*100)/100 : x); };
+    return [d.toLocaleDateString('en-US'), d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}), r.who || '',
+      r.source === 'tech' ? 'Southwest Pools visit' : 'Home test', r.water_source === 'source' ? 'Fill water' : 'Pool',
+      v(r.lsi_value), r.lsi_status || '', v(r.ph), v(r.free_chlorine), v(r.total_alkalinity), v(r.calcium_hardness),
+      v(r.cyanuric_acid), v(r.tds), v(r.phosphates), v(r.water_temp), (r.chemicals_added || '').replace(/\s+/g,' ').trim()];
+  });
+  return { head: head, rows: rows };
+}
+function historyCsv(history, saltLabel) {
+  var t = histRows(history, saltLabel);
+  var esc = function(s){ s = String(s); return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s; };
+  return '﻿' + [t.head].concat(t.rows).map(function(r){ return r.map(esc).join(','); }).join('\r\n');
+}
+function historyPdf(history, saltLabel, job) {
+  if (!window.jspdf) return null;
+  var doc = new window.jspdf.jsPDF({ orientation:'landscape', unit:'pt', format:'letter' });
+  var pageW = 792, pageH = 612, ml = 30, contentW = pageW - 60;
+  var t = histRows(history, saltLabel);
+  // columns shown in the PDF (notes go on their own line under the row)
+  var cols = [0,2,3,5,6,7,8,9,10,11,12,13,14];
+  var widths = [58,108,96,36,70,32,46,50,46,34,44,50,44];
+  var pdfHead = {8:'Chlorine',9:'Alkalinity',13:'Phos',14:'Temp °F'};
+  var y = 30;
+  function header(first) {
+    doc.setFillColor(3, 65, 127); doc.roundedRect(ml, y, contentW, first ? 58 : 28, 5, 5, 'F');
+    if (first) {
+      doc.setFillColor(255,255,255); doc.roundedRect(ml + 8, y + 8, 128, 42, 4, 4, 'F');
+      try { doc.addImage(PDF_LOCKUP, 'PNG', ml + 14, y + 11, 114, 38); } catch(e) {}
+      doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(15);
+      doc.text('Pool Water History', ml + 152, y + 22);
+      doc.setFont('helvetica','normal'); doc.setFontSize(10);
+      doc.text(((job && job.name) || '') + (job && job.address ? '  ·  ' + job.address : ''), ml + 152, y + 37);
+      doc.text('Printed ' + new Date().toLocaleDateString('en-US') + '  ·  ' + history.length + ' readings  ·  Signature Care Plan member', ml + 152, y + 50);
+      y += 68;
+    } else {
+      doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(11);
+      doc.text('Pool Water History — ' + ((job && job.name) || ''), ml + 10, y + 18); y += 36;
+    }
+    doc.setFillColor(240,244,248); doc.rect(ml, y, contentW, 18, 'F');
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(3,65,127);
+    var x = ml + 3; cols.forEach(function(c, i){ doc.text(pdfHead[c] || t.head[c], x, y + 12); x += widths[i]; });
+    y += 18;
+  }
+  header(true);
+  t.rows.forEach(function(row, ri){
+    var notes = row[15];
+    var noteLines = notes ? doc.splitTextToSize('Added / notes: ' + notes, contentW - 10) : [];
+    var rowH = 15 + noteLines.length * 9;
+    if (y + rowH > pageH - 36) { doc.addPage(); y = 30; header(false); }
+    var bg = ri % 2 === 0 ? [255,255,255] : [249,251,253];
+    doc.setFillColor(bg[0],bg[1],bg[2]); doc.rect(ml, y, contentW, rowH, 'F');
+    doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(40,40,40);
+    var x = ml + 3; cols.forEach(function(c, i){ doc.text(String(row[c]).substring(0, i === 1 ? 28 : 24), x, y + 11); x += widths[i]; });
+    if (noteLines.length) { doc.setTextColor(110,110,110); doc.text(noteLines, ml + 6, y + 20); }
+    y += rowH;
+  });
+  var pages = doc.getNumberOfPages();
+  for (var i = 1; i <= pages; i++) {
+    doc.setPage(i); doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(150,150,150);
+    doc.text('Southwest Pools, LLC  |  swpoolsdfw.com  |  469-328-0155        Page ' + i + ' of ' + pages, pageW/2, pageH - 16, {align:'center'});
+  }
+  return doc.output('blob');
+}
 function fmtWhen(iso) { try { var d = new Date(iso); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + ' · ' + d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}); } catch(e) { return ''; } }
 function num(v, d) { if (v === null || v === undefined || v === '') return '—'; var n = Number(v); if (isNaN(n)) return String(v); return d ? n.toFixed(d) : String(Math.round(n*100)/100); }
 var TEMP_TABLE = [[32,0.0],[37,0.1],[46,0.2],[53,0.3],[60,0.4],[66,0.5],[76,0.6],[84,0.7],[94,0.8],[105,0.9]];
@@ -365,6 +445,7 @@ function SWPCustomerChemistryApp() {
   var _histLoading = useState(false), histLoading = _histLoading[0], setHistLoading = _histLoading[1];
   var _histErr = useState(false), histErr = _histErr[0], setHistErr = _histErr[1];
   var _booting = useState(true), booting = _booting[0], setBooting = _booting[1];
+  var _exporting = useState(''), exporting = _exporting[0], setExporting = _exporting[1];
   // Chemistry state
   var _mode = useState('dials'), mode = _mode[0], setMode = _mode[1];
   var _vol = useState(0), volume = _vol[0], setVolume = _vol[1];
@@ -499,6 +580,20 @@ function SWPCustomerChemistryApp() {
         setAuthErr(e && e.status === 404 ? 'Job not found. Please check your job number and try again.' : 'Connection error. Please try again.');
         setLoading(false); setBooting(false);
       });
+  }
+  function fileBase() { return 'Pool_History_' + String((job && job.name) || 'pool').replace(/[^a-zA-Z0-9]+/g,'_').slice(0,40) + '_' + new Date().toISOString().slice(0,10); }
+  function downloadCsv() {
+    var csv = historyCsv(history, sanitizerType === 'Salt' ? 'Salt' : 'TDS');
+    saveFile(new Blob([csv], { type:'text/csv;charset=utf-8' }), fileBase() + '.csv');
+  }
+  function downloadPdf() {
+    setExporting('pdf');
+    (window.ensureJsPdf ? window.ensureJsPdf() : Promise.resolve(false)).catch(function(){ return false; }).then(function(){
+      var blob = historyPdf(history, sanitizerType === 'Salt' ? 'Salt' : 'TDS', job);
+      setExporting('');
+      if (!blob) { alert('Couldn’t build the report. Check your connection and try again.'); return; }
+      saveFile(blob, fileBase() + '.pdf');
+    });
   }
   function switchPerson() {
     try { localStorage.removeItem(SIGNIN_KEY); } catch(e) {}
@@ -878,6 +973,10 @@ function SWPCustomerChemistryApp() {
           {histLoading && <div style={{fontSize:12,color:B.grayMid}}>Loading…</div>}
           {histErr && !histLoading && <div style={{fontSize:12,color:B.flagRed}}>Couldn’t load your history. Check your connection and try again.</div>}
           {!histLoading && !histErr && history.length === 0 && <div style={{fontSize:12,color:B.grayMid}}>No readings yet. Your first saved test will show here.</div>}
+          {!histLoading && history.length > 0 && <div style={{display:'flex',gap:8,marginBottom:12}}>
+            <button style={Object.assign({},S.calcBtn,{flex:1,margin:0,padding:'10px 6px',fontSize:13})} onClick={downloadCsv}>Download spreadsheet</button>
+            <button style={Object.assign({},S.calcBtn,{flex:1,margin:0,padding:'10px 6px',fontSize:13})} onClick={downloadPdf} disabled={exporting==='pdf'}>{exporting==='pdf' ? 'Building report…' : 'Download report (PDF)'}</button>
+          </div>}
           {history.map(function(r){
             var meta = lsiMeta(Number(r.lsi_value));
             var tech = r.source === 'tech';
@@ -1049,7 +1148,7 @@ function SWPCustomerChemistryApp() {
         </button>
       )}
       {saveResult === 'error' && <div style={{textAlign:'center',fontSize:12,color:B.flagRed,marginBottom:8}}>Save failed — check your connection and try again</div>}
-      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v2.1.0 — Signature Care Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
+      <div style={{textAlign:'center',padding:'8px 0 20px',fontSize:10,color:B.grayDim}}>My Pool Chemistry v2.2.0 — Signature Care Plan<br/>Southwest Pools LLC | swpoolsdfw.com</div>
     </div>
   );
 }
